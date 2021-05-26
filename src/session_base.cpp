@@ -486,6 +486,7 @@ void zmq::session_base_t::engine_error (bool handshaked_,
             }
 
         case i_engine::protocol_error:
+            std::cout << "DEBUG:session:" << this  << ": protocol_error : _pending " << _pending << " : _pipe " << _pipe << " : _zap_pipe " << _zap_pipe << std::endl;
             if (_pending) {
                 if (_pipe)
                     _pipe->terminate (false);
