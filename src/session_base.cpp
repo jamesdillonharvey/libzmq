@@ -51,6 +51,8 @@
 #include "radio.hpp"
 #include "dish.hpp"
 
+#include <iostream>
+
 zmq::session_base_t *zmq::session_base_t::create (class io_thread_t *io_thread_,
                                                   bool active_,
                                                   class socket_base_t *socket_,

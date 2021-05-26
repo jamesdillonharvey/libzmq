@@ -107,6 +107,8 @@
 #include "peer.hpp"
 #include "channel.hpp"
 
+#include <iostream>
+
 void zmq::socket_base_t::inprocs_t::emplace (const char *endpoint_uri_,
                                              pipe_t *pipe_)
 {
@@ -902,6 +904,10 @@ int zmq::socket_base_t::connect_internal (const char *endpoint_uri_)
             // There is no valid use for multiple connects for SUB-PUB nor
             // DEALER-ROUTER nor REQ-REP. Multiple connects produces
             // nonsensical results.
+            //
+            std::cout << "DEBUG:socket:" << this  << ": Connect skipped as already connected to : " << endpoint_uri_ << std::endl;
+            int state = _endpoints.begin()->second.second->get_state();
+            std::cout << "DEBUG:socket:" << this  << ":  pipe state : " << state << std::endl;
             return 0;
         }
     }
