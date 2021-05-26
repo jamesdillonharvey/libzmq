@@ -55,7 +55,6 @@ class fq_t
     int recv (msg_t *msg_);
     int recvpipe (msg_t *msg_, pipe_t **pipe_);
     bool has_in ();
-    const blob_t &get_credential () const;
 
   private:
     //  Inbound pipes.
@@ -66,11 +65,6 @@ class fq_t
     //  beginning of the pipes array.
     pipes_t::size_type _active;
 
-    //  Pointer to the last pipe we received message from.
-    //  NULL when no message has been received or the pipe
-    //  has terminated.
-    pipe_t *_last_in;
-
     //  Index of the next bound pipe to read a message from.
     pipes_t::size_type _current;
 
@@ -78,11 +72,7 @@ class fq_t
     //  there are following parts still waiting in the current pipe.
     bool _more;
 
-    //  Holds credential after the last_active_pipe has terminated.
-    blob_t _saved_credential;
-
-    fq_t (const fq_t &);
-    const fq_t &operator= (const fq_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (fq_t)
 };
 }
 

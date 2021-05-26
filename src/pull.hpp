@@ -41,7 +41,7 @@ class pipe_t;
 class msg_t;
 class io_thread_t;
 
-class pull_t : public socket_base_t
+class pull_t ZMQ_FINAL : public socket_base_t
 {
   public:
     pull_t (zmq::ctx_t *parent_, uint32_t tid_, int sid_);
@@ -49,10 +49,11 @@ class pull_t : public socket_base_t
 
   protected:
     //  Overrides of functions from socket_base_t.
-    void xattach_pipe (zmq::pipe_t *pipe_, bool subscribe_to_all_);
+    void xattach_pipe (zmq::pipe_t *pipe_,
+                       bool subscribe_to_all_,
+                       bool locally_initiated_);
     int xrecv (zmq::msg_t *msg_);
     bool xhas_in ();
-    const blob_t &get_credential () const;
     void xread_activated (zmq::pipe_t *pipe_);
     void xpipe_terminated (zmq::pipe_t *pipe_);
 
@@ -60,8 +61,7 @@ class pull_t : public socket_base_t
     //  Fair queueing object for inbound pipes.
     fq_t _fq;
 
-    pull_t (const pull_t &);
-    const pull_t &operator= (const pull_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (pull_t)
 };
 }
 

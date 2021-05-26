@@ -49,7 +49,7 @@
 void zmq::seed_random ()
 {
 #if defined ZMQ_HAVE_WINDOWS
-    int pid = static_cast<int> (GetCurrentProcessId ());
+    const int pid = static_cast<int> (GetCurrentProcessId ());
 #else
     int pid = static_cast<int> (getpid ());
 #endif
@@ -59,7 +59,7 @@ void zmq::seed_random ()
 uint32_t zmq::generate_random ()
 {
     //  Compensate for the fact that rand() returns signed integer.
-    uint32_t low = static_cast<uint32_t> (rand ());
+    const uint32_t low = static_cast<uint32_t> (rand ());
     uint32_t high = static_cast<uint32_t> (rand ());
     high <<= (sizeof (int) * 8 - 1);
     return high | low;
@@ -154,6 +154,8 @@ static void manage_random (bool init_)
     } else {
         randombytes_close ();
     }
+#else
+    LIBZMQ_UNUSED (init_);
 #endif
 }
 

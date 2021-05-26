@@ -35,6 +35,7 @@
 #include "pipe.hpp"
 #include "likely.hpp"
 #include "tcp_connecter.hpp"
+#include "ws_connecter.hpp"
 #include "ipc_connecter.hpp"
 #include "tipc_connecter.hpp"
 #include "socks_connecter.hpp"
@@ -86,9 +87,23 @@ zmq::session_base_t *zmq::session_base_t::create (class io_thread_t *io_thread_,
         case ZMQ_GATHER:
         case ZMQ_SCATTER:
         case ZMQ_DGRAM:
+        case ZMQ_PEER:
+        case ZMQ_CHANNEL:
+#ifdef ZMQ_BUILD_DRAFT_API
+            if (options_.can_send_hello_msg && options_.hello_msg.size () > 0)
+                s = new (std::nothrow) hello_msg_session_t (
+                  io_thread_, active_, socket_, options_, addr_);
+            else
+                s = new (std::nothrow) session_base_t (
+                  io_thread_, active_, socket_, options_, addr_);
+
+            break;
+#else
             s = new (std::nothrow)
               session_base_t (io_thread_, active_, socket_, options_, addr_);
             break;
+#endif
+
         default:
             errno = EINVAL;
             return NULL;
@@ -114,10 +129,14 @@ zmq::session_base_t::session_base_t (class io_thread_t *io_thread_,
     _io_thread (io_thread_),
     _has_linger_timer (false),
     _addr (addr_)
+#ifdef ZMQ_HAVE_WSS
+    ,
+    _wss_hostname (options_.wss_hostname)
+#endif
 {
 }
 
-const char *zmq::session_base_t::get_endpoint () const
+const zmq::endpoint_uri_pair_t &zmq::session_base_t::get_endpoint () const
 {
     return _engine->get_endpoint ();
 }
@@ -163,10 +182,12 @@ int zmq::session_base_t::pull_msg (msg_t *msg_)
 
 int zmq::session_base_t::push_msg (msg_t *msg_)
 {
-    if (msg_->flags () & msg_t::command)
+    //  pass subscribe/cancel to the sockets
+    if ((msg_->flags () & msg_t::command) && !msg_->is_subscribe ()
+        && !msg_->is_cancel ())
         return 0;
     if (_pipe && _pipe->write (msg_)) {
-        int rc = msg_->init ();
+        const int rc = msg_->init ();
         errno_assert (rc == 0);
         return 0;
     }
@@ -213,6 +234,12 @@ void zmq::session_base_t::flush ()
 {
     if (_pipe)
         _pipe->flush ();
+}
+
+void zmq::session_base_t::rollback ()
+{
+    if (_pipe)
+        _pipe->rollback ();
 }
 
 void zmq::session_base_t::clean_pipes ()
@@ -281,7 +308,8 @@ void zmq::session_base_t::read_activated (pipe_t *pipe_)
     }
 
     if (unlikely (_engine == NULL)) {
-        _pipe->check_read ();
+        if (_pipe)
+            _pipe->check_read ();
         return;
     }
 
@@ -312,7 +340,7 @@ void zmq::session_base_t::hiccuped (pipe_t *)
     zmq_assert (false);
 }
 
-zmq::socket_base_t *zmq::session_base_t::get_socket ()
+zmq::socket_base_t *zmq::session_base_t::get_socket () const
 {
     return _socket;
 }
@@ -372,7 +400,7 @@ int zmq::session_base_t::zap_connect ()
     return 0;
 }
 
-bool zmq::session_base_t::zap_enabled ()
+bool zmq::session_base_t::zap_enabled () const
 {
     return (options.mechanism != ZMQ_NULL || !options.zap_domain.empty ());
 }
@@ -380,22 +408,29 @@ bool zmq::session_base_t::zap_enabled ()
 void zmq::session_base_t::process_attach (i_engine *engine_)
 {
     zmq_assert (engine_ != NULL);
+    zmq_assert (!_engine);
+    _engine = engine_;
 
+    if (!engine_->has_handshake_stage ())
+        engine_ready ();
+
+    //  Plug in the engine.
+    _engine->plug (_io_thread, this);
+}
+
+void zmq::session_base_t::engine_ready ()
+{
     //  Create the pipe if it does not exist yet.
     if (!_pipe && !is_terminating ()) {
         object_t *parents[2] = {this, _socket};
         pipe_t *pipes[2] = {NULL, NULL};
 
-        bool conflate =
-          options.conflate
-          && (options.type == ZMQ_DEALER || options.type == ZMQ_PULL
-              || options.type == ZMQ_PUSH || options.type == ZMQ_PUB
-              || options.type == ZMQ_SUB);
+        const bool conflate = get_effective_conflate_option (options);
 
         int hwms[2] = {conflate ? -1 : options.rcvhwm,
                        conflate ? -1 : options.sndhwm};
         bool conflates[2] = {conflate, conflate};
-        int rc = pipepair (parents, pipes, hwms, conflates);
+        const int rc = pipepair (parents, pipes, hwms, conflates);
         errno_assert (rc == 0);
 
         //  Plug the local end of the pipe.
@@ -405,40 +440,50 @@ void zmq::session_base_t::process_attach (i_engine *engine_)
         zmq_assert (!_pipe);
         _pipe = pipes[0];
 
+        //  The endpoints strings are not set on bind, set them here so that
+        //  events can use them.
+        pipes[0]->set_endpoint_pair (_engine->get_endpoint ());
+        pipes[1]->set_endpoint_pair (_engine->get_endpoint ());
+
         //  Ask socket to plug into the remote end of the pipe.
         send_bind (_socket, pipes[1]);
     }
-
-    //  Plug in the engine.
-    zmq_assert (!_engine);
-    _engine = engine_;
-    _engine->plug (_io_thread, this);
 }
 
-void zmq::session_base_t::engine_error (
-  zmq::stream_engine_t::error_reason_t reason_)
+void zmq::session_base_t::engine_error (bool handshaked_,
+                                        zmq::i_engine::error_reason_t reason_)
 {
     //  Engine is dead. Let's forget about it.
     _engine = NULL;
 
     //  Remove any half-done messages from the pipes.
-    if (_pipe)
+    if (_pipe) {
         clean_pipes ();
 
-    zmq_assert (reason_ == stream_engine_t::connection_error
-                || reason_ == stream_engine_t::timeout_error
-                || reason_ == stream_engine_t::protocol_error);
+#ifdef ZMQ_BUILD_DRAFT_API
+        //  Only send disconnect message if socket was accepted and handshake was completed
+        if (!_active && handshaked_ && options.can_recv_disconnect_msg
+            && !options.disconnect_msg.empty ()) {
+            _pipe->set_disconnect_msg (options.disconnect_msg);
+            _pipe->send_disconnect_msg ();
+        }
+#endif
+    }
+
+    zmq_assert (reason_ == i_engine::connection_error
+                || reason_ == i_engine::timeout_error
+                || reason_ == i_engine::protocol_error);
 
     switch (reason_) {
-        case stream_engine_t::timeout_error:
+        case i_engine::timeout_error:
             /* FALLTHROUGH */
-        case stream_engine_t::connection_error:
+        case i_engine::connection_error:
             if (_active) {
                 reconnect ();
                 break;
             }
-            /* FALLTHROUGH */
-        case stream_engine_t::protocol_error:
+
+        case i_engine::protocol_error:
             if (_pending) {
                 if (_pipe)
                     _pipe->terminate (false);
@@ -509,12 +554,25 @@ void zmq::session_base_t::timer_event (int id_)
     _pipe->terminate (false);
 }
 
+void zmq::session_base_t::process_conn_failed ()
+{
+    std::string *ep = new (std::string);
+    _addr->to_string (*ep);
+    send_term_endpoint (_socket, ep);
+}
+
 void zmq::session_base_t::reconnect ()
 {
     //  For delayed connect situations, terminate the pipe
     //  and reestablish later on
-    if (_pipe && options.immediate == 1 && _addr->protocol != "pgm"
-        && _addr->protocol != "epgm" && _addr->protocol != "norm"
+    if (_pipe && options.immediate == 1
+#ifdef ZMQ_HAVE_OPENPGM
+        && _addr->protocol != protocol_name::pgm
+        && _addr->protocol != protocol_name::epgm
+#endif
+#ifdef ZMQ_HAVE_NORM
+        && _addr->protocol != protocol_name::norm
+#endif
         && _addr->protocol != protocol_name::udp) {
         _pipe->hiccup ();
         _pipe->terminate (false);
@@ -530,7 +588,7 @@ void zmq::session_base_t::reconnect ()
     reset ();
 
     //  Reconnect.
-    if (options.reconnect_ivl != -1)
+    if (options.reconnect_ivl > 0)
         start_connecting (true);
     else {
         std::string *ep = new (std::string);
@@ -556,46 +614,61 @@ void zmq::session_base_t::start_connecting (bool wait_)
     zmq_assert (io_thread);
 
     //  Create the connecter object.
-
+    own_t *connecter = NULL;
     if (_addr->protocol == protocol_name::tcp) {
         if (!options.socks_proxy_address.empty ()) {
             address_t *proxy_address = new (std::nothrow)
               address_t (protocol_name::tcp, options.socks_proxy_address,
                          this->get_ctx ());
             alloc_assert (proxy_address);
-            socks_connecter_t *connecter = new (std::nothrow)
-              socks_connecter_t (io_thread, this, options, _addr, proxy_address,
-                                 wait_);
+            connecter = new (std::nothrow) socks_connecter_t (
+              io_thread, this, options, _addr, proxy_address, wait_);
             alloc_assert (connecter);
-            launch_child (connecter);
+            if (!options.socks_proxy_username.empty ()) {
+                reinterpret_cast<socks_connecter_t *> (connecter)
+                  ->set_auth_method_basic (options.socks_proxy_username,
+                                           options.socks_proxy_password);
+            }
         } else {
-            tcp_connecter_t *connecter = new (std::nothrow)
+            connecter = new (std::nothrow)
               tcp_connecter_t (io_thread, this, options, _addr, wait_);
-            alloc_assert (connecter);
-            launch_child (connecter);
         }
-        return;
     }
-
-#if !defined ZMQ_HAVE_WINDOWS && !defined ZMQ_HAVE_OPENVMS                     \
-  && !defined ZMQ_HAVE_VXWORKS
-    if (_addr->protocol == protocol_name::ipc) {
-        ipc_connecter_t *connecter = new (std::nothrow)
+#if defined ZMQ_HAVE_IPC
+    else if (_addr->protocol == protocol_name::ipc) {
+        connecter = new (std::nothrow)
           ipc_connecter_t (io_thread, this, options, _addr, wait_);
-        alloc_assert (connecter);
-        launch_child (connecter);
-        return;
     }
 #endif
 #if defined ZMQ_HAVE_TIPC
-    if (_addr->protocol == protocol_name::tipc) {
-        tipc_connecter_t *connecter = new (std::nothrow)
+    else if (_addr->protocol == protocol_name::tipc) {
+        connecter = new (std::nothrow)
           tipc_connecter_t (io_thread, this, options, _addr, wait_);
+    }
+#endif
+#if defined ZMQ_HAVE_VMCI
+    else if (_addr->protocol == protocol_name::vmci) {
+        connecter = new (std::nothrow)
+          vmci_connecter_t (io_thread, this, options, _addr, wait_);
+    }
+#endif
+#if defined ZMQ_HAVE_WS
+    else if (_addr->protocol == protocol_name::ws) {
+        connecter = new (std::nothrow) ws_connecter_t (
+          io_thread, this, options, _addr, wait_, false, std::string ());
+    }
+#endif
+#if defined ZMQ_HAVE_WSS
+    else if (_addr->protocol == protocol_name::wss) {
+        connecter = new (std::nothrow) ws_connecter_t (
+          io_thread, this, options, _addr, wait_, true, _wss_hostname);
+    }
+#endif
+    if (connecter != NULL) {
         alloc_assert (connecter);
         launch_child (connecter);
         return;
     }
-#endif
 
     if (_addr->protocol == protocol_name::udp) {
         zmq_assert (options.type == ZMQ_DISH || options.type == ZMQ_RADIO
@@ -698,15 +771,41 @@ void zmq::session_base_t::start_connecting (bool wait_)
     }
 #endif // ZMQ_HAVE_NORM
 
-#if defined ZMQ_HAVE_VMCI
-    if (_addr->protocol == protocol_name::vmci) {
-        vmci_connecter_t *connecter = new (std::nothrow)
-          vmci_connecter_t (io_thread, this, options, _addr, wait_);
-        alloc_assert (connecter);
-        launch_child (connecter);
-        return;
-    }
-#endif
-
     zmq_assert (false);
+}
+
+zmq::hello_msg_session_t::hello_msg_session_t (io_thread_t *io_thread_,
+                                               bool connect_,
+                                               socket_base_t *socket_,
+                                               const options_t &options_,
+                                               address_t *addr_) :
+    session_base_t (io_thread_, connect_, socket_, options_, addr_),
+    _new_pipe (true)
+{
+}
+
+zmq::hello_msg_session_t::~hello_msg_session_t ()
+{
+}
+
+
+int zmq::hello_msg_session_t::pull_msg (msg_t *msg_)
+{
+    if (_new_pipe) {
+        _new_pipe = false;
+
+        const int rc =
+          msg_->init_buffer (&options.hello_msg[0], options.hello_msg.size ());
+        errno_assert (rc == 0);
+
+        return 0;
+    }
+
+    return session_base_t::pull_msg (msg_);
+}
+
+void zmq::hello_msg_session_t::reset ()
+{
+    session_base_t::reset ();
+    _new_pipe = true;
 }

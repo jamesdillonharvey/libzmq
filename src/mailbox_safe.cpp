@@ -32,6 +32,8 @@
 #include "clock.hpp"
 #include "err.hpp"
 
+#include <algorithm>
+
 zmq::mailbox_safe_t::mailbox_safe_t (mutex_t *sync_) : _sync (sync_)
 {
     //  Get the pipe into passive state. That way, if the users starts by
@@ -58,15 +60,12 @@ void zmq::mailbox_safe_t::add_signaler (signaler_t *signaler_)
 
 void zmq::mailbox_safe_t::remove_signaler (signaler_t *signaler_)
 {
-    std::vector<signaler_t *>::iterator it = _signalers.begin ();
-
     // TODO: make a copy of array and signal outside the lock
-    for (; it != _signalers.end (); ++it) {
-        if (*it == signaler_)
-            break;
-    }
+    const std::vector<zmq::signaler_t *>::iterator end = _signalers.end ();
+    const std::vector<signaler_t *>::iterator it =
+      std::find (_signalers.begin (), end, signaler_);
 
-    if (it != _signalers.end ())
+    if (it != end)
         _signalers.erase (it);
 }
 
@@ -83,8 +82,10 @@ void zmq::mailbox_safe_t::send (const command_t &cmd_)
 
     if (!ok) {
         _cond_var.broadcast ();
-        for (std::vector<signaler_t *>::iterator it = _signalers.begin ();
-             it != _signalers.end (); ++it) {
+
+        for (std::vector<signaler_t *>::iterator it = _signalers.begin (),
+                                                 end = _signalers.end ();
+             it != end; ++it) {
             (*it)->send ();
         }
     }
@@ -98,11 +99,18 @@ int zmq::mailbox_safe_t::recv (command_t *cmd_, int timeout_)
     if (_cpipe.read (cmd_))
         return 0;
 
-    //  Wait for signal from the command sender.
-    int rc = _cond_var.wait (_sync, timeout_);
-    if (rc == -1) {
-        errno_assert (errno == EAGAIN || errno == EINTR);
-        return -1;
+    //  If the timeout is zero, it will be quicker to release the lock, giving other a chance to send a command
+    //  and immediately relock it.
+    if (timeout_ == 0) {
+        _sync->unlock ();
+        _sync->lock ();
+    } else {
+        //  Wait for signal from the command sender.
+        const int rc = _cond_var.wait (_sync, timeout_);
+        if (rc == -1) {
+            errno_assert (errno == EAGAIN || errno == EINTR);
+            return -1;
+        }
     }
 
     //  Another thread may already fetch the command

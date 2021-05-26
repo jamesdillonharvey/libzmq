@@ -41,7 +41,7 @@ class pipe_t;
 class msg_t;
 class io_thread_t;
 
-class push_t : public socket_base_t
+class push_t ZMQ_FINAL : public socket_base_t
 {
   public:
     push_t (zmq::ctx_t *parent_, uint32_t tid_, int sid_);
@@ -49,7 +49,9 @@ class push_t : public socket_base_t
 
   protected:
     //  Overrides of functions from socket_base_t.
-    void xattach_pipe (zmq::pipe_t *pipe_, bool subscribe_to_all_);
+    void xattach_pipe (zmq::pipe_t *pipe_,
+                       bool subscribe_to_all_,
+                       bool locally_initiated_);
     int xsend (zmq::msg_t *msg_);
     bool xhas_out ();
     void xwrite_activated (zmq::pipe_t *pipe_);
@@ -59,8 +61,7 @@ class push_t : public socket_base_t
     //  Load balancer managing the outbound pipes.
     lb_t _lb;
 
-    push_t (const push_t &);
-    const push_t &operator= (const push_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (push_t)
 };
 }
 

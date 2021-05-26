@@ -39,14 +39,16 @@ namespace zmq
 class ctx_t;
 class pipe_t;
 
-class stream_t : public routing_socket_base_t
+class stream_t ZMQ_FINAL : public routing_socket_base_t
 {
   public:
     stream_t (zmq::ctx_t *parent_, uint32_t tid_, int sid_);
     ~stream_t ();
 
     //  Overrides of functions from socket_base_t.
-    void xattach_pipe (zmq::pipe_t *pipe_, bool subscribe_to_all_);
+    void xattach_pipe (zmq::pipe_t *pipe_,
+                       bool subscribe_to_all_,
+                       bool locally_initiated_);
     int xsend (zmq::msg_t *msg_);
     int xrecv (zmq::msg_t *msg_);
     bool xhas_in ();
@@ -57,7 +59,7 @@ class stream_t : public routing_socket_base_t
 
   private:
     //  Generate peer's id and update lookup map
-    void identify_peer (pipe_t *pipe_);
+    void identify_peer (pipe_t *pipe_, bool locally_initiated_);
 
     //  Fair queueing object for inbound pipes.
     fq_t _fq;
@@ -85,8 +87,7 @@ class stream_t : public routing_socket_base_t
     //  algorithm. This value is the next ID to use (if not used already).
     uint32_t _next_integral_routing_id;
 
-    stream_t (const stream_t &);
-    const stream_t &operator= (const stream_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (stream_t)
 };
 }
 

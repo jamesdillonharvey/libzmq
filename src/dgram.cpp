@@ -39,7 +39,6 @@
 zmq::dgram_t::dgram_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
     socket_base_t (parent_, tid_, sid_),
     _pipe (NULL),
-    _last_in (NULL),
     _more_out (false)
 {
     options.type = ZMQ_DGRAM;
@@ -51,9 +50,12 @@ zmq::dgram_t::~dgram_t ()
     zmq_assert (!_pipe);
 }
 
-void zmq::dgram_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::dgram_t::xattach_pipe (pipe_t *pipe_,
+                                 bool subscribe_to_all_,
+                                 bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
+    LIBZMQ_UNUSED (locally_initiated_);
 
     zmq_assert (pipe_);
 
@@ -68,10 +70,6 @@ void zmq::dgram_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
 void zmq::dgram_t::xpipe_terminated (pipe_t *pipe_)
 {
     if (pipe_ == _pipe) {
-        if (_last_in == _pipe) {
-            _saved_credential.set_deep_copy (_last_in->get_credential ());
-            _last_in = NULL;
-        }
         _pipe = NULL;
     }
 }
@@ -92,7 +90,7 @@ int zmq::dgram_t::xsend (msg_t *msg_)
 {
     // If there's no out pipe, just drop it.
     if (!_pipe) {
-        int rc = msg_->close ();
+        const int rc = msg_->close ();
         errno_assert (rc == 0);
         return -1;
     }
@@ -104,18 +102,12 @@ int zmq::dgram_t::xsend (msg_t *msg_)
             errno = EINVAL;
             return -1;
         }
-
-        //  Expect one more message frame.
-        _more_out = true;
     } else {
         //  dgram messages are two part only, reject part if more is set
         if (msg_->flags () & msg_t::more) {
             errno = EINVAL;
             return -1;
         }
-
-        //  This is the last part of the message.
-        _more_out = false;
     }
 
     // Push the message into the pipe.
@@ -127,8 +119,11 @@ int zmq::dgram_t::xsend (msg_t *msg_)
     if (!(msg_->flags () & msg_t::more))
         _pipe->flush ();
 
+    // flip the more flag
+    _more_out = !_more_out;
+
     //  Detach the message from the data buffer.
-    int rc = msg_->init ();
+    const int rc = msg_->init ();
     errno_assert (rc == 0);
 
     return 0;
@@ -148,7 +143,6 @@ int zmq::dgram_t::xrecv (msg_t *msg_)
         errno = EAGAIN;
         return -1;
     }
-    _last_in = _pipe;
 
     return 0;
 }
@@ -167,9 +161,4 @@ bool zmq::dgram_t::xhas_out ()
         return false;
 
     return _pipe->check_write ();
-}
-
-const zmq::blob_t &zmq::dgram_t::get_credential () const
-{
-    return _last_in ? _last_in->get_credential () : _saved_credential;
 }

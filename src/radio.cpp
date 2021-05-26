@@ -47,9 +47,12 @@ zmq::radio_t::~radio_t ()
 {
 }
 
-void zmq::radio_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::radio_t::xattach_pipe (pipe_t *pipe_,
+                                 bool subscribe_to_all_,
+                                 bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
+    LIBZMQ_UNUSED (locally_initiated_);
 
     zmq_assert (pipe_);
 
@@ -119,21 +122,27 @@ int zmq::radio_t::xsetsockopt (int option_,
 
 void zmq::radio_t::xpipe_terminated (pipe_t *pipe_)
 {
-    //  NOTE: erase invalidates an iterator, and that's why it's not incrementing in post-loop
-    //  read-after-free caught by Valgrind, see https://github.com/zeromq/libzmq/pull/1771
-    for (subscriptions_t::iterator it = _subscriptions.begin ();
-         it != _subscriptions.end ();) {
+    for (subscriptions_t::iterator it = _subscriptions.begin (),
+                                   end = _subscriptions.end ();
+         it != end;) {
         if (it->second == pipe_) {
+#if __cplusplus >= 201103L || (defined _MSC_VER && _MSC_VER >= 1700)
+            it = _subscriptions.erase (it);
+#else
             _subscriptions.erase (it++);
+#endif
         } else {
             ++it;
         }
     }
 
-    udp_pipes_t::iterator it =
-      std::find (_udp_pipes.begin (), _udp_pipes.end (), pipe_);
-    if (it != _udp_pipes.end ())
-        _udp_pipes.erase (it);
+    {
+        const udp_pipes_t::iterator end = _udp_pipes.end ();
+        const udp_pipes_t::iterator it =
+          std::find (_udp_pipes.begin (), end, pipe_);
+        if (it != end)
+            _udp_pipes.erase (it);
+    }
 
     _dist.pipe_terminated (pipe_);
 }
@@ -148,14 +157,15 @@ int zmq::radio_t::xsend (msg_t *msg_)
 
     _dist.unmatch ();
 
-    std::pair<subscriptions_t::iterator, subscriptions_t::iterator> range =
-      _subscriptions.equal_range (std::string (msg_->group ()));
+    const std::pair<subscriptions_t::iterator, subscriptions_t::iterator>
+      range = _subscriptions.equal_range (std::string (msg_->group ()));
 
     for (subscriptions_t::iterator it = range.first; it != range.second; ++it)
         _dist.match (it->second);
 
-    for (udp_pipes_t::iterator it = _udp_pipes.begin ();
-         it != _udp_pipes.end (); ++it)
+    for (udp_pipes_t::iterator it = _udp_pipes.begin (),
+                               end = _udp_pipes.end ();
+         it != end; ++it)
         _dist.match (*it);
 
     int rc = -1;
@@ -208,7 +218,7 @@ int zmq::radio_session_t::push_msg (msg_t *msg_)
         const size_t data_size = msg_->size ();
 
         int group_length;
-        char *group;
+        const char *group;
 
         msg_t join_leave_msg;
         int rc;
@@ -252,7 +262,7 @@ int zmq::radio_session_t::pull_msg (msg_t *msg_)
             return rc;
 
         const char *group = _pending_msg.group ();
-        int length = static_cast<int> (strlen (group));
+        const int length = static_cast<int> (strlen (group));
 
         //  First frame is the group
         rc = msg_->init_size (length);

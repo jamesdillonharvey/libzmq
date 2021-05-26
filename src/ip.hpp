@@ -51,12 +51,15 @@ int get_peer_ip_address (fd_t sockfd_, std::string &ip_addr_);
 // Sets the IP Type-Of-Service for the underlying socket
 void set_ip_type_of_service (fd_t s_, int iptos_);
 
+// Sets the protocol-defined priority for the underlying socket
+void set_socket_priority (fd_t s_, int priority_);
+
 // Sets the SO_NOSIGPIPE option for the underlying socket.
 // Return 0 on success, -1 if the connection has been closed by the peer
 int set_nosigpipe (fd_t s_);
 
 // Binds the underlying socket to the given device, eg. VRF or interface
-void bind_to_device (fd_t s_, std::string &bound_device_);
+int bind_to_device (fd_t s_, const std::string &bound_device_);
 
 // Initialize network subsystem. May be called multiple times. Each call must be matched by a call to shutdown_network.
 bool initialize_network ();
@@ -71,6 +74,16 @@ int make_fdpair (fd_t *r_, fd_t *w_);
 // Makes a socket non-inheritable to child processes.
 // Asserts on any failure.
 void make_socket_noninheritable (fd_t sock_);
+
+//  Asserts that:
+//  - an internal 0MQ error did not occur,
+//  - and, if a socket error occured, it can be recovered from.
+void assert_success_or_recoverable (fd_t s_, int rc_);
+
+#ifdef ZMQ_HAVE_IPC
+// Create an IPC wildcard path address
+int create_ipc_wildcard_address (std::string &path_, std::string &file_);
+#endif
 }
 
 #endif

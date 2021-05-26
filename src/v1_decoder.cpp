@@ -52,7 +52,7 @@ zmq::v1_decoder_t::v1_decoder_t (size_t bufsize_, int64_t maxmsgsize_) :
 
 zmq::v1_decoder_t::~v1_decoder_t ()
 {
-    int rc = _in_progress.close ();
+    const int rc = _in_progress.close ();
     errno_assert (rc == 0);
 }
 
@@ -111,11 +111,13 @@ int zmq::v1_decoder_t::eight_byte_size_ready (unsigned char const *)
         return -1;
     }
 
+#ifndef __aarch64__
     //  Message size must fit within range of size_t data type.
     if (payload_length - 1 > std::numeric_limits<size_t>::max ()) {
         errno = EMSGSIZE;
         return -1;
     }
+#endif
 
     const size_t msg_size = static_cast<size_t> (payload_length - 1);
 

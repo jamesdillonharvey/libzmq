@@ -37,15 +37,19 @@ zmq::client_t::client_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
     socket_base_t (parent_, tid_, sid_, true)
 {
     options.type = ZMQ_CLIENT;
+    options.can_send_hello_msg = true;
 }
 
 zmq::client_t::~client_t ()
 {
 }
 
-void zmq::client_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::client_t::xattach_pipe (pipe_t *pipe_,
+                                  bool subscribe_to_all_,
+                                  bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
+    LIBZMQ_UNUSED (locally_initiated_);
 
     zmq_assert (pipe_);
 
@@ -91,11 +95,6 @@ bool zmq::client_t::xhas_in ()
 bool zmq::client_t::xhas_out ()
 {
     return _lb.has_out ();
-}
-
-const zmq::blob_t &zmq::client_t::get_credential () const
-{
-    return _fq.get_credential ();
 }
 
 void zmq::client_t::xread_activated (pipe_t *pipe_)

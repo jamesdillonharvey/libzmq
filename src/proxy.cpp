@@ -89,9 +89,8 @@ typedef struct
 
 // Utility functions
 
-int capture (class zmq::socket_base_t *capture_,
-             zmq::msg_t &msg_,
-             int more_ = 0)
+static int
+capture (class zmq::socket_base_t *capture_, zmq::msg_t *msg_, int more_ = 0)
 {
     //  Copy message to capture socket if any
     if (capture_) {
@@ -99,7 +98,7 @@ int capture (class zmq::socket_base_t *capture_,
         int rc = ctrl.init ();
         if (unlikely (rc < 0))
             return -1;
-        rc = ctrl.copy (msg_);
+        rc = ctrl.copy (*msg_);
         if (unlikely (rc < 0))
             return -1;
         rc = capture_->send (&ctrl, more_ ? ZMQ_SNDMORE : 0);
@@ -109,46 +108,55 @@ int capture (class zmq::socket_base_t *capture_,
     return 0;
 }
 
-int forward (class zmq::socket_base_t *from_,
-             zmq_socket_stats_t *from_stats_,
-             class zmq::socket_base_t *to_,
-             zmq_socket_stats_t *to_stats_,
-             class zmq::socket_base_t *capture_,
-             zmq::msg_t &msg_)
+static int forward (class zmq::socket_base_t *from_,
+                    zmq_socket_stats_t *from_stats_,
+                    class zmq::socket_base_t *to_,
+                    zmq_socket_stats_t *to_stats_,
+                    class zmq::socket_base_t *capture_,
+                    zmq::msg_t *msg_)
 {
-    int more;
-    size_t moresz;
-    size_t complete_msg_size = 0;
-    while (true) {
-        int rc = from_->recv (&msg_, 0);
-        if (unlikely (rc < 0))
-            return -1;
+    // Forward a burst of messages
+    for (unsigned int i = 0; i < zmq::proxy_burst_size; i++) {
+        int more;
+        size_t moresz;
+        size_t complete_msg_size = 0;
 
-        complete_msg_size += msg_.size ();
+        // Forward all the parts of one message
+        while (true) {
+            int rc = from_->recv (msg_, ZMQ_DONTWAIT);
+            if (rc < 0) {
+                if (likely (errno == EAGAIN && i > 0))
+                    return 0; // End of burst
 
-        moresz = sizeof more;
-        rc = from_->getsockopt (ZMQ_RCVMORE, &more, &moresz);
-        if (unlikely (rc < 0))
-            return -1;
+                return -1;
+            }
 
-        //  Copy message to capture socket if any
-        rc = capture (capture_, msg_, more);
-        if (unlikely (rc < 0))
-            return -1;
+            complete_msg_size += msg_->size ();
 
-        rc = to_->send (&msg_, more ? ZMQ_SNDMORE : 0);
-        if (unlikely (rc < 0))
-            return -1;
+            moresz = sizeof more;
+            rc = from_->getsockopt (ZMQ_RCVMORE, &more, &moresz);
+            if (unlikely (rc < 0))
+                return -1;
 
-        if (more == 0)
-            break;
+            //  Copy message to capture socket if any
+            rc = capture (capture_, msg_, more);
+            if (unlikely (rc < 0))
+                return -1;
+
+            rc = to_->send (msg_, more ? ZMQ_SNDMORE : 0);
+            if (unlikely (rc < 0))
+                return -1;
+
+            if (more == 0)
+                break;
+        }
+
+        // A multipart message counts as 1 packet:
+        from_stats_->msg_in++;
+        from_stats_->bytes_in += complete_msg_size;
+        to_stats_->msg_out++;
+        to_stats_->bytes_out += complete_msg_size;
     }
-
-    // A multipart message counts as 1 packet:
-    from_stats_->msg_in++;
-    from_stats_->bytes_in += complete_msg_size;
-    to_stats_->msg_out++;
-    to_stats_->bytes_out += complete_msg_size;
 
     return 0;
 }
@@ -163,7 +171,7 @@ static int loop_and_send_multipart_stat (zmq::socket_base_t *control_,
 
     //  VSM of 8 bytes can't fail to init
     msg.init_size (sizeof (uint64_t));
-    memcpy (msg.data (), (const void *) &stat_, sizeof (uint64_t));
+    memcpy (msg.data (), &stat_, sizeof (uint64_t));
 
     //  if the first message is handed to the pipe successfully then the HWM
     //  is not full, which means failures are due to interrupts (on Windows pipes
@@ -175,9 +183,9 @@ static int loop_and_send_multipart_stat (zmq::socket_base_t *control_,
     return rc;
 }
 
-int reply_stats (class zmq::socket_base_t *control_,
-                 zmq_socket_stats_t *frontend_stats_,
-                 zmq_socket_stats_t *backend_stats_)
+static int reply_stats (zmq::socket_base_t *control_,
+                        const zmq_socket_stats_t *frontend_stats_,
+                        const zmq_socket_stats_t *backend_stats_)
 {
     // first part: frontend stats - the first send might fail due to HWM
     if (loop_and_send_multipart_stat (control_, frontend_stats_->msg_in, true,
@@ -366,10 +374,7 @@ int zmq::proxy (class socket_base_t *frontend_,
         }
     }
 
-
-    int i;
     bool request_processed, reply_processed;
-
 
     while (state != terminated) {
         //  Blocking wait initially only for 'ZMQ_POLLIN' - 'poller_wait' points to 'poller_in'.
@@ -387,7 +392,7 @@ int zmq::proxy (class socket_base_t *frontend_,
         CHECK_RC_EXIT_ON_FAILURE ();
 
         //  Process events.
-        for (i = 0; i < rc; i++) {
+        for (int i = 0; i < rc; i++) {
             if (events[i].socket == frontend_) {
                 frontend_in = (events[i].events & ZMQ_POLLIN) != 0;
                 frontend_out = (events[i].events & ZMQ_POLLOUT) != 0;
@@ -413,7 +418,7 @@ int zmq::proxy (class socket_base_t *frontend_,
             }
 
             //  Copy message to capture socket if any.
-            rc = capture (capture_, msg);
+            rc = capture (capture_, &msg);
             CHECK_RC_EXIT_ON_FAILURE ();
 
             if (msg.size () == 5 && memcmp (msg.data (), "PAUSE", 5) == 0) {
@@ -428,20 +433,16 @@ int zmq::proxy (class socket_base_t *frontend_,
                     && memcmp (msg.data (), "TERMINATE", 9) == 0)
                     state = terminated;
                 else {
-#ifdef ZMQ_BUILD_DRAFT_API
                     if (msg.size () == 10
                         && memcmp (msg.data (), "STATISTICS", 10) == 0) {
                         rc = reply_stats (control_, &frontend_stats,
                                           &backend_stats);
                         CHECK_RC_EXIT_ON_FAILURE ();
                     } else {
-#endif
                         //  This is an API error, we assert
                         puts ("E: invalid command sent to proxy");
                         zmq_assert (false);
-#ifdef ZMQ_BUILD_DRAFT_API
                     }
-#endif
                 }
             }
             control_in = false;
@@ -452,7 +453,7 @@ int zmq::proxy (class socket_base_t *frontend_,
             //  In case of frontend_==backend_ there's no 'ZMQ_POLLOUT' event.
             if (frontend_in && (backend_out || frontend_equal_to_backend)) {
                 rc = forward (frontend_, &frontend_stats, backend_,
-                              &backend_stats, capture_, msg);
+                              &backend_stats, capture_, &msg);
                 CHECK_RC_EXIT_ON_FAILURE ();
                 request_processed = true;
                 frontend_in = backend_out = false;
@@ -465,7 +466,7 @@ int zmq::proxy (class socket_base_t *frontend_,
             //  design in 'for' event processing loop.
             if (backend_in && frontend_out) {
                 rc = forward (backend_, &backend_stats, frontend_,
-                              &frontend_stats, capture_, msg);
+                              &frontend_stats, capture_, &msg);
                 CHECK_RC_EXIT_ON_FAILURE ();
                 reply_processed = true;
                 backend_in = frontend_out = false;
@@ -595,7 +596,7 @@ int zmq::proxy (class socket_base_t *frontend_,
                 return close_and_return (&msg, -1);
 
             //  Copy message to capture socket if any
-            rc = capture (capture_, msg);
+            rc = capture (capture_, &msg);
             if (unlikely (rc < 0))
                 return close_and_return (&msg, -1);
 
@@ -607,7 +608,6 @@ int zmq::proxy (class socket_base_t *frontend_,
                      && memcmp (msg.data (), "TERMINATE", 9) == 0)
                 state = terminated;
             else {
-#ifdef ZMQ_BUILD_DRAFT_API
                 if (msg.size () == 10
                     && memcmp (msg.data (), "STATISTICS", 10) == 0) {
                     rc =
@@ -615,20 +615,17 @@ int zmq::proxy (class socket_base_t *frontend_,
                     if (unlikely (rc < 0))
                         return close_and_return (&msg, -1);
                 } else {
-#endif
                     //  This is an API error, we assert
                     puts ("E: invalid command sent to proxy");
                     zmq_assert (false);
-#ifdef ZMQ_BUILD_DRAFT_API
                 }
-#endif
             }
         }
         //  Process a request
         if (state == active && items[0].revents & ZMQ_POLLIN
             && (frontend_ == backend_ || itemsout[1].revents & ZMQ_POLLOUT)) {
             rc = forward (frontend_, &frontend_stats, backend_, &backend_stats,
-                          capture_, msg);
+                          capture_, &msg);
             if (unlikely (rc < 0))
                 return close_and_return (&msg, -1);
         }
@@ -637,7 +634,7 @@ int zmq::proxy (class socket_base_t *frontend_,
             && items[1].revents & ZMQ_POLLIN
             && itemsout[0].revents & ZMQ_POLLOUT) {
             rc = forward (backend_, &backend_stats, frontend_, &frontend_stats,
-                          capture_, msg);
+                          capture_, &msg);
             if (unlikely (rc < 0))
                 return close_and_return (&msg, -1);
         }

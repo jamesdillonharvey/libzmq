@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "array.hpp"
+#include "macros.hpp"
 
 namespace zmq
 {
@@ -49,6 +50,9 @@ class dist_t
 
     //  Adds the pipe to the distributor object.
     void attach (zmq::pipe_t *pipe_);
+
+    //  Checks if this pipe is present in the distributor.
+    bool has_pipe (zmq::pipe_t *pipe_);
 
     //  Activates pipe that have previously reached high watermark.
     void activated (zmq::pipe_t *pipe_);
@@ -72,7 +76,7 @@ class dist_t
     //  Send the message to all the outbound pipes.
     int send_to_all (zmq::msg_t *msg_);
 
-    bool has_out ();
+    static bool has_out ();
 
     // check HWM of all pipes matching
     bool check_hwm ();
@@ -107,8 +111,7 @@ class dist_t
     //  True if last we are in the middle of a multipart message.
     bool _more;
 
-    dist_t (const dist_t &);
-    const dist_t &operator= (const dist_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (dist_t)
 };
 }
 

@@ -38,15 +38,19 @@ zmq::dealer_t::dealer_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
     _probe_router (false)
 {
     options.type = ZMQ_DEALER;
+    options.can_send_hello_msg = true;
 }
 
 zmq::dealer_t::~dealer_t ()
 {
 }
 
-void zmq::dealer_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::dealer_t::xattach_pipe (pipe_t *pipe_,
+                                  bool subscribe_to_all_,
+                                  bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
+    LIBZMQ_UNUSED (locally_initiated_);
 
     zmq_assert (pipe_);
 
@@ -57,7 +61,7 @@ void zmq::dealer_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
 
         rc = pipe_->write (&probe_msg);
         // zmq_assert (rc) is not applicable here, since it is not a bug.
-        (void) rc;
+        LIBZMQ_UNUSED (rc);
 
         pipe_->flush ();
 
@@ -73,7 +77,7 @@ int zmq::dealer_t::xsetsockopt (int option_,
                                 const void *optval_,
                                 size_t optvallen_)
 {
-    bool is_int = (optvallen_ == sizeof (int));
+    const bool is_int = (optvallen_ == sizeof (int));
     int value = 0;
     if (is_int)
         memcpy (&value, optval_, sizeof (int));
@@ -113,12 +117,6 @@ bool zmq::dealer_t::xhas_out ()
 {
     return _lb.has_out ();
 }
-
-const zmq::blob_t &zmq::dealer_t::get_credential () const
-{
-    return _fq.get_credential ();
-}
-
 
 void zmq::dealer_t::xread_activated (pipe_t *pipe_)
 {

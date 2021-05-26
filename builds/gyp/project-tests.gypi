@@ -133,6 +133,17 @@
       ],
     },
     {
+      'target_name': 'test_msg_init',
+      'type': 'executable',
+      'sources': [
+        '../../tests/test_msg_init.cpp',
+        '../../tests/testutil.hpp'
+      ],
+      'dependencies': [
+        'libzmq'
+      ],
+    },
+    {
       'target_name': 'test_connect_resolve',
       'type': 'executable',
       'sources': [
@@ -885,6 +896,17 @@
       'type': 'executable',
       'sources': [
         '../../tests/test_abstract_ipc.cpp',
+        '../../tests/testutil.hpp'
+      ],
+      'dependencies': [
+        'libzmq'
+      ],
+    },
+    {
+      'target_name': 'test_pubsub',
+      'type': 'executable',
+      'sources': [
+        '../../tests/test_pubsub.cpp',
         '../../tests/testutil.hpp'
       ],
       'dependencies': [

@@ -55,6 +55,8 @@ zmq::router_t::router_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
     options.type = ZMQ_ROUTER;
     options.recv_routing_id = true;
     options.raw_socket = false;
+    options.can_send_hello_msg = true;
+    options.can_recv_disconnect_msg = true;
 
     _prefetched_id.init ();
     _prefetched_msg.init ();
@@ -67,7 +69,9 @@ zmq::router_t::~router_t ()
     _prefetched_msg.close ();
 }
 
-void zmq::router_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::router_t::xattach_pipe (pipe_t *pipe_,
+                                  bool subscribe_to_all_,
+                                  bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
 
@@ -88,7 +92,7 @@ void zmq::router_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
         errno_assert (rc == 0);
     }
 
-    bool routing_id_ok = identify_peer (pipe_);
+    const bool routing_id_ok = identify_peer (pipe_, locally_initiated_);
     if (routing_id_ok)
         _fq.attach (pipe_);
     else
@@ -137,6 +141,16 @@ int zmq::router_t::xsetsockopt (int option_,
             }
             break;
 
+#ifdef ZMQ_BUILD_DRAFT_API
+        case ZMQ_ROUTER_NOTIFY:
+            if (is_int && value >= 0
+                && value <= (ZMQ_NOTIFY_CONNECT | ZMQ_NOTIFY_DISCONNECT)) {
+                options.router_notify = value;
+                return 0;
+            }
+            break;
+#endif
+
         default:
             return routing_socket_base_t::xsetsockopt (option_, optval_,
                                                        optvallen_);
@@ -148,10 +162,7 @@ int zmq::router_t::xsetsockopt (int option_,
 
 void zmq::router_t::xpipe_terminated (pipe_t *pipe_)
 {
-    std::set<pipe_t *>::iterator it = _anonymous_pipes.find (pipe_);
-    if (it != _anonymous_pipes.end ())
-        _anonymous_pipes.erase (it);
-    else {
+    if (0 == _anonymous_pipes.erase (pipe_)) {
         erase_out_pipe (pipe_);
         _fq.pipe_terminated (pipe_);
         pipe_->rollback ();
@@ -162,11 +173,11 @@ void zmq::router_t::xpipe_terminated (pipe_t *pipe_)
 
 void zmq::router_t::xread_activated (pipe_t *pipe_)
 {
-    std::set<pipe_t *>::iterator it = _anonymous_pipes.find (pipe_);
+    const std::set<pipe_t *>::iterator it = _anonymous_pipes.find (pipe_);
     if (it == _anonymous_pipes.end ())
         _fq.activated (pipe_);
     else {
-        bool routing_id_ok = identify_peer (pipe_);
+        const bool routing_id_ok = identify_peer (pipe_, false);
         if (routing_id_ok) {
             _anonymous_pipes.erase (it);
             _fq.attach (pipe_);
@@ -189,7 +200,7 @@ int zmq::router_t::xsend (msg_t *msg_)
 
             //  Find the pipe associated with the routing id stored in the prefix.
             //  If there's no such pipe just silently ignore the message, unless
-            //  router_mandatory is set.            ;
+            //  router_mandatory is set.
             out_pipe_t *out_pipe = lookup_out_pipe (
               blob_t (static_cast<unsigned char *> (msg_->data ()),
                       msg_->size (), zmq::reference_tag_t ()));
@@ -200,7 +211,7 @@ int zmq::router_t::xsend (msg_t *msg_)
                 // Check whether pipe is closed or not
                 if (!_current_out->check_write ()) {
                     // Check whether pipe is full or not
-                    bool pipe_full = !_current_out->check_hwm ();
+                    const bool pipe_full = !_current_out->check_hwm ();
                     out_pipe->active = false;
                     _current_out = NULL;
 
@@ -249,10 +260,10 @@ int zmq::router_t::xsend (msg_t *msg_)
             return 0;
         }
 
-        bool ok = _current_out->write (msg_);
+        const bool ok = _current_out->write (msg_);
         if (unlikely (!ok)) {
             // Message failed to send - we must close it ourselves.
-            int rc = msg_->close ();
+            const int rc = msg_->close ();
             errno_assert (rc == 0);
             // HWM was checked before, so the pipe must be gone. Roll back
             // messages that were piped, for example REP labels.
@@ -265,12 +276,12 @@ int zmq::router_t::xsend (msg_t *msg_)
             }
         }
     } else {
-        int rc = msg_->close ();
+        const int rc = msg_->close ();
         errno_assert (rc == 0);
     }
 
     //  Detach the message from the data buffer.
-    int rc = msg_->init ();
+    const int rc = msg_->init ();
     errno_assert (rc == 0);
 
     return 0;
@@ -280,11 +291,11 @@ int zmq::router_t::xrecv (msg_t *msg_)
 {
     if (_prefetched) {
         if (!_routing_id_sent) {
-            int rc = msg_->move (_prefetched_id);
+            const int rc = msg_->move (_prefetched_id);
             errno_assert (rc == 0);
             _routing_id_sent = true;
         } else {
-            int rc = msg_->move (_prefetched_msg);
+            const int rc = msg_->move (_prefetched_msg);
             errno_assert (rc == 0);
             _prefetched = false;
         }
@@ -398,9 +409,9 @@ bool zmq::router_t::xhas_in ()
     return true;
 }
 
-static bool check_pipe_hwm (const zmq::pipe_t &pipe)
+static bool check_pipe_hwm (const zmq::pipe_t &pipe_)
 {
-    return pipe.check_hwm ();
+    return pipe_.check_hwm ();
 }
 
 bool zmq::router_t::xhas_out ()
@@ -415,17 +426,15 @@ bool zmq::router_t::xhas_out ()
     return any_of_out_pipes (check_pipe_hwm);
 }
 
-const zmq::blob_t &zmq::router_t::get_credential () const
-{
-    return _fq.get_credential ();
-}
-
 int zmq::router_t::get_peer_state (const void *routing_id_,
                                    size_t routing_id_size_) const
 {
     int res = 0;
 
-    blob_t routing_id_blob ((unsigned char *) routing_id_, routing_id_size_);
+    // TODO remove the const_cast, see comment in lookup_out_pipe
+    const blob_t routing_id_blob (
+      static_cast<unsigned char *> (const_cast<void *> (routing_id_)),
+      routing_id_size_, reference_tag_t ());
     const out_pipe_t *out_pipe = lookup_out_pipe (routing_id_blob);
     if (!out_pipe) {
         errno = EHOSTUNREACH;
@@ -440,13 +449,13 @@ int zmq::router_t::get_peer_state (const void *routing_id_,
     return res;
 }
 
-bool zmq::router_t::identify_peer (pipe_t *pipe_)
+bool zmq::router_t::identify_peer (pipe_t *pipe_, bool locally_initiated_)
 {
     msg_t msg;
     blob_t routing_id;
 
-    const std::string connect_routing_id = extract_connect_routing_id ();
-    if (!connect_routing_id.empty ()) {
+    if (locally_initiated_ && connect_routing_id_is_set ()) {
+        const std::string connect_routing_id = extract_connect_routing_id ();
         routing_id.set (
           reinterpret_cast<const unsigned char *> (connect_routing_id.c_str ()),
           connect_routing_id.length ());
@@ -462,7 +471,7 @@ bool zmq::router_t::identify_peer (pipe_t *pipe_)
     } else if (!options.raw_socket) {
         //  Pick up handshake cases and also case where next integral routing id is set
         msg.init ();
-        bool ok = pipe_->read (&msg);
+        const bool ok = pipe_->read (&msg);
         if (!ok)
             return false;
 
@@ -480,9 +489,10 @@ bool zmq::router_t::identify_peer (pipe_t *pipe_)
 
             //  Try to remove an existing routing id entry to allow the new
             //  connection to take the routing id.
-            out_pipe_t existing_outpipe = try_erase_out_pipe (routing_id);
+            const out_pipe_t *const existing_outpipe =
+              lookup_out_pipe (routing_id);
 
-            if (existing_outpipe.pipe) {
+            if (existing_outpipe) {
                 if (!_handover)
                     //  Ignore peers with duplicate ID
                     return false;
@@ -495,15 +505,16 @@ bool zmq::router_t::identify_peer (pipe_t *pipe_)
                 put_uint32 (buf + 1, _next_integral_routing_id++);
                 blob_t new_routing_id (buf, sizeof buf);
 
-                existing_outpipe.pipe->set_router_socket_routing_id (
-                  new_routing_id);
+                pipe_t *const old_pipe = existing_outpipe->pipe;
 
-                add_out_pipe (ZMQ_MOVE (new_routing_id), existing_outpipe.pipe);
+                erase_out_pipe (old_pipe);
+                old_pipe->set_router_socket_routing_id (new_routing_id);
+                add_out_pipe (ZMQ_MOVE (new_routing_id), old_pipe);
 
-                if (existing_outpipe.pipe == _current_in)
+                if (old_pipe == _current_in)
                     _terminate_current_in = true;
                 else
-                    existing_outpipe.pipe->terminate (true);
+                    old_pipe->terminate (true);
             }
         }
     }

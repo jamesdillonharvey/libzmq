@@ -44,19 +44,22 @@ zmq::dish_t::dish_t (class ctx_t *parent_, uint32_t tid_, int sid_) :
     //  subscription commands are sent to the wire.
     options.linger.store (0);
 
-    int rc = _message.init ();
+    const int rc = _message.init ();
     errno_assert (rc == 0);
 }
 
 zmq::dish_t::~dish_t ()
 {
-    int rc = _message.close ();
+    const int rc = _message.close ();
     errno_assert (rc == 0);
 }
 
-void zmq::dish_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::dish_t::xattach_pipe (pipe_t *pipe_,
+                                bool subscribe_to_all_,
+                                bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
+    LIBZMQ_UNUSED (locally_initiated_);
 
     zmq_assert (pipe_);
     _fq.attach (pipe_);
@@ -90,22 +93,18 @@ void zmq::dish_t::xhiccuped (pipe_t *pipe_)
 
 int zmq::dish_t::xjoin (const char *group_)
 {
-    std::string group = std::string (group_);
+    const std::string group = std::string (group_);
 
     if (group.length () > ZMQ_GROUP_MAX_LENGTH) {
         errno = EINVAL;
         return -1;
     }
 
-    subscriptions_t::iterator it = _subscriptions.find (group);
-
     //  User cannot join same group twice
-    if (it != _subscriptions.end ()) {
+    if (!_subscriptions.insert (group).second) {
         errno = EINVAL;
         return -1;
     }
-
-    _subscriptions.insert (group);
 
     msg_t msg;
     int rc = msg.init_join ();
@@ -118,7 +117,7 @@ int zmq::dish_t::xjoin (const char *group_)
     rc = _dist.send_to_all (&msg);
     if (rc != 0)
         err = errno;
-    int rc2 = msg.close ();
+    const int rc2 = msg.close ();
     errno_assert (rc2 == 0);
     if (rc != 0)
         errno = err;
@@ -127,22 +126,17 @@ int zmq::dish_t::xjoin (const char *group_)
 
 int zmq::dish_t::xleave (const char *group_)
 {
-    std::string group = std::string (group_);
+    const std::string group = std::string (group_);
 
     if (group.length () > ZMQ_GROUP_MAX_LENGTH) {
         errno = EINVAL;
         return -1;
     }
 
-    subscriptions_t::iterator it =
-      std::find (_subscriptions.begin (), _subscriptions.end (), group);
-
-    if (it == _subscriptions.end ()) {
+    if (0 == _subscriptions.erase (group)) {
         errno = EINVAL;
         return -1;
     }
-
-    _subscriptions.erase (it);
 
     msg_t msg;
     int rc = msg.init_leave ();
@@ -155,7 +149,7 @@ int zmq::dish_t::xleave (const char *group_)
     rc = _dist.send_to_all (&msg);
     if (rc != 0)
         err = errno;
-    int rc2 = msg.close ();
+    const int rc2 = msg.close ();
     errno_assert (rc2 == 0);
     if (rc != 0)
         errno = err;
@@ -180,27 +174,31 @@ int zmq::dish_t::xrecv (msg_t *msg_)
     //  If there's already a message prepared by a previous call to zmq_poll,
     //  return it straight ahead.
     if (_has_message) {
-        int rc = msg_->move (_message);
+        const int rc = msg_->move (_message);
         errno_assert (rc == 0);
         _has_message = false;
         return 0;
     }
 
-    while (true) {
+    return xxrecv (msg_);
+}
+
+int zmq::dish_t::xxrecv (msg_t *msg_)
+{
+    do {
         //  Get a message using fair queueing algorithm.
-        int rc = _fq.recv (msg_);
+        const int rc = _fq.recv (msg_);
 
         //  If there's no message available, return immediately.
         //  The same when error occurs.
         if (rc != 0)
             return -1;
 
-        //  Filtering non matching messages
-        subscriptions_t::iterator it =
-          _subscriptions.find (std::string (msg_->group ()));
-        if (it != _subscriptions.end ())
-            return 0;
-    }
+        //  Skip non matching messages
+    } while (0 == _subscriptions.count (std::string (msg_->group ())));
+
+    //  Found a matching message
+    return 0;
 }
 
 bool zmq::dish_t::xhas_in ()
@@ -210,36 +208,22 @@ bool zmq::dish_t::xhas_in ()
     if (_has_message)
         return true;
 
-    while (true) {
-        //  Get a message using fair queueing algorithm.
-        int rc = _fq.recv (&_message);
-
-        //  If there's no message available, return immediately.
-        //  The same when error occurs.
-        if (rc != 0) {
-            errno_assert (errno == EAGAIN);
-            return false;
-        }
-
-        //  Filtering non matching messages
-        subscriptions_t::iterator it =
-          _subscriptions.find (std::string (_message.group ()));
-        if (it != _subscriptions.end ()) {
-            _has_message = true;
-            return true;
-        }
+    const int rc = xxrecv (&_message);
+    if (rc != 0) {
+        errno_assert (errno == EAGAIN);
+        return false;
     }
-}
 
-const zmq::blob_t &zmq::dish_t::get_credential () const
-{
-    return _fq.get_credential ();
+    //  Matching message found
+    _has_message = true;
+    return true;
 }
 
 void zmq::dish_t::send_subscriptions (pipe_t *pipe_)
 {
-    for (subscriptions_t::iterator it = _subscriptions.begin ();
-         it != _subscriptions.end (); ++it) {
+    for (subscriptions_t::iterator it = _subscriptions.begin (),
+                                   end = _subscriptions.end ();
+         it != end; ++it) {
         msg_t msg;
         int rc = msg.init_join ();
         errno_assert (rc == 0);
@@ -249,7 +233,6 @@ void zmq::dish_t::send_subscriptions (pipe_t *pipe_)
 
         //  Send it to the pipe.
         pipe_->write (&msg);
-        msg.close ();
     }
 
     pipe_->flush ();
@@ -285,7 +268,7 @@ int zmq::dish_session_t::push_msg (msg_t *msg_)
         _group_msg = *msg_;
         _state = body;
 
-        int rc = msg_->init ();
+        const int rc = msg_->init ();
         errno_assert (rc == 0);
         return 0;
     }
@@ -328,7 +311,7 @@ int zmq::dish_session_t::pull_msg (msg_t *msg_)
     if (!msg_->is_join () && !msg_->is_leave ())
         return rc;
 
-    int group_length = static_cast<int> (strlen (msg_->group ()));
+    const int group_length = static_cast<int> (strlen (msg_->group ()));
 
     msg_t command;
     int offset;

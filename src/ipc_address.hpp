@@ -30,13 +30,18 @@
 #ifndef __ZMQ_IPC_ADDRESS_HPP_INCLUDED__
 #define __ZMQ_IPC_ADDRESS_HPP_INCLUDED__
 
+#if defined ZMQ_HAVE_IPC
+
 #include <string>
 
-#if !defined ZMQ_HAVE_WINDOWS && !defined ZMQ_HAVE_OPENVMS                     \
-  && !defined ZMQ_HAVE_VXWORKS
-
+#if defined _MSC_VER
+#include <afunix.h>
+#else
 #include <sys/socket.h>
 #include <sys/un.h>
+#endif
+
+#include "macros.hpp"
 
 namespace zmq
 {
@@ -51,16 +56,16 @@ class ipc_address_t
     int resolve (const char *path_);
 
     //  The opposite to resolve()
-    int to_string (std::string &addr_);
+    int to_string (std::string &addr_) const;
 
     const sockaddr *addr () const;
     socklen_t addrlen () const;
 
   private:
-    struct sockaddr_un address;
+    struct sockaddr_un _address;
+    socklen_t _addrlen;
 
-    ipc_address_t (const ipc_address_t &);
-    const ipc_address_t &operator= (const ipc_address_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (ipc_address_t)
 };
 }
 

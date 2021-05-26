@@ -57,13 +57,15 @@ zmq::stream_t::~stream_t ()
     _prefetched_msg.close ();
 }
 
-void zmq::stream_t::xattach_pipe (pipe_t *pipe_, bool subscribe_to_all_)
+void zmq::stream_t::xattach_pipe (pipe_t *pipe_,
+                                  bool subscribe_to_all_,
+                                  bool locally_initiated_)
 {
     LIBZMQ_UNUSED (subscribe_to_all_);
 
     zmq_assert (pipe_);
 
-    identify_peer (pipe_);
+    identify_peer (pipe_, locally_initiated_);
     _fq.attach (pipe_);
 }
 
@@ -144,17 +146,17 @@ int zmq::stream_t::xsend (msg_t *msg_)
             _current_out = NULL;
             return 0;
         }
-        bool ok = _current_out->write (msg_);
+        const bool ok = _current_out->write (msg_);
         if (likely (ok))
             _current_out->flush ();
         _current_out = NULL;
     } else {
-        int rc = msg_->close ();
+        const int rc = msg_->close ();
         errno_assert (rc == 0);
     }
 
     //  Detach the message from the data buffer.
-    int rc = msg_->init ();
+    const int rc = msg_->init ();
     errno_assert (rc == 0);
 
     return 0;
@@ -179,11 +181,11 @@ int zmq::stream_t::xrecv (msg_t *msg_)
 {
     if (_prefetched) {
         if (!_routing_id_sent) {
-            int rc = msg_->move (_prefetched_routing_id);
+            const int rc = msg_->move (_prefetched_routing_id);
             errno_assert (rc == 0);
             _routing_id_sent = true;
         } else {
-            int rc = msg_->move (_prefetched_msg);
+            const int rc = msg_->move (_prefetched_msg);
             errno_assert (rc == 0);
             _prefetched = false;
         }
@@ -264,14 +266,14 @@ bool zmq::stream_t::xhas_out ()
     return true;
 }
 
-void zmq::stream_t::identify_peer (pipe_t *pipe_)
+void zmq::stream_t::identify_peer (pipe_t *pipe_, bool locally_initiated_)
 {
     //  Always assign routing id for raw-socket
     unsigned char buffer[5];
     buffer[0] = 0;
     blob_t routing_id;
-    const std::string connect_routing_id = extract_connect_routing_id ();
-    if (!connect_routing_id.empty ()) {
+    if (locally_initiated_ && connect_routing_id_is_set ()) {
+        const std::string connect_routing_id = extract_connect_routing_id ();
         routing_id.set (
           reinterpret_cast<const unsigned char *> (connect_routing_id.c_str ()),
           connect_routing_id.length ());

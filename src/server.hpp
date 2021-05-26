@@ -52,7 +52,9 @@ class server_t : public socket_base_t
     ~server_t ();
 
     //  Overrides of functions from socket_base_t.
-    void xattach_pipe (zmq::pipe_t *pipe_, bool subscribe_to_all_);
+    void xattach_pipe (zmq::pipe_t *pipe_,
+                       bool subscribe_to_all_,
+                       bool locally_initiated_);
     int xsend (zmq::msg_t *msg_);
     int xrecv (zmq::msg_t *msg_);
     bool xhas_in ();
@@ -60,9 +62,6 @@ class server_t : public socket_base_t
     void xread_activated (zmq::pipe_t *pipe_);
     void xwrite_activated (zmq::pipe_t *pipe_);
     void xpipe_terminated (zmq::pipe_t *pipe_);
-
-  protected:
-    const blob_t &get_credential () const;
 
   private:
     //  Fair queueing object for inbound pipes.
@@ -82,8 +81,7 @@ class server_t : public socket_base_t
     //  algorithm. This value is the next ID to use (if not used already).
     uint32_t _next_routing_id;
 
-    server_t (const server_t &);
-    const server_t &operator= (const server_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (server_t)
 };
 }
 

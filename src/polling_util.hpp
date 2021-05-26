@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <vector>
 
+#include "macros.hpp"
 #include "stdint.hpp"
 #include "platform.hpp"
 #include "err.hpp"
@@ -45,7 +46,7 @@ template <typename T, size_t S> class fast_vector_t
     explicit fast_vector_t (const size_t nitems_)
     {
         if (nitems_ > S) {
-            _buf = static_cast<T *> (malloc (nitems_ * sizeof (T)));
+            _buf = new (std::nothrow) T[nitems_];
             //  TODO since this function is called by a client, we could return errno == ENOMEM here
             alloc_assert (_buf);
         } else {
@@ -58,15 +59,14 @@ template <typename T, size_t S> class fast_vector_t
     ~fast_vector_t ()
     {
         if (_buf != _static_buf)
-            free (_buf);
+            delete[] _buf;
     }
 
   private:
-    fast_vector_t (const fast_vector_t &);
-    fast_vector_t &operator= (const fast_vector_t &);
-
     T _static_buf[S];
     T *_buf;
+
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (fast_vector_t)
 };
 
 template <typename T, size_t S> class resizable_fast_vector_t
@@ -96,20 +96,17 @@ template <typename T, size_t S> class resizable_fast_vector_t
     ~resizable_fast_vector_t () { delete _dynamic_buf; }
 
   private:
-    resizable_fast_vector_t (const resizable_fast_vector_t &);
-    resizable_fast_vector_t &operator= (const resizable_fast_vector_t &);
-
     T _static_buf[S];
     std::vector<T> *_dynamic_buf;
+
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (resizable_fast_vector_t)
 };
 
 #if defined ZMQ_POLL_BASED_ON_POLL
 typedef int timeout_t;
 
-timeout_t compute_timeout (const bool first_pass_,
-                           const long timeout_,
-                           const uint64_t now_,
-                           const uint64_t end_);
+timeout_t
+compute_timeout (bool first_pass_, long timeout_, uint64_t now_, uint64_t end_);
 
 #elif defined ZMQ_POLL_BASED_ON_SELECT
 inline size_t valid_pollset_bytes (const fd_set &pollset_)

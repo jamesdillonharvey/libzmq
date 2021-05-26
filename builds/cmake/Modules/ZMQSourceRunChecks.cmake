@@ -42,7 +42,7 @@ macro(zmq_check_o_cloexec)
 int main(int argc, char *argv [])
 {
     int s = open (\"/dev/null\", O_CLOEXEC | O_RDONLY);
-    return (s == -1);
+    return s == -1;
 }
 "
     ZMQ_HAVE_O_CLOEXEC)
@@ -273,7 +273,7 @@ int main(int argc, char *argv [])
     return 0;
 }
 "
-    ZMQ_HAVE_PTHREAD_SETAFFINITY)
+    ZMQ_HAVE_PTHREAD_SET_AFFINITY)
   set(CMAKE_REQUIRED_FLAGS ${SAVE_CMAKE_REQUIRED_FLAGS})
 endmacro()
 
@@ -310,4 +310,23 @@ int main(int argc, char *argv [])
 }
 "
     ZMQ_HAVE_NOEXCEPT)
+endmacro()
+
+macro(zmq_check_so_priority)
+  message(STATUS "Checking whether SO_PRIORITY is supported")
+  check_c_source_runs(
+    "
+#include <sys/types.h>
+#include <sys/socket.h>
+
+int main (int argc, char *argv [])
+{
+    int s, rc, opt = 1;
+    return (
+        ((s = socket (PF_INET, SOCK_STREAM, 0)) == -1) ||
+        ((rc = setsockopt (s, SOL_SOCKET, SO_PRIORITY, (char*) &opt, sizeof (int))) == -1)
+    );
+}
+"
+    ZMQ_HAVE_SO_PRIORITY)
 endmacro()

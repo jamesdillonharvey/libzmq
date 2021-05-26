@@ -44,7 +44,7 @@ class ctx_t;
 class pipe_t;
 class io_thread_t;
 
-class dish_t : public socket_base_t
+class dish_t ZMQ_FINAL : public socket_base_t
 {
   public:
     dish_t (zmq::ctx_t *parent_, uint32_t tid_, int sid_);
@@ -52,12 +52,13 @@ class dish_t : public socket_base_t
 
   protected:
     //  Overrides of functions from socket_base_t.
-    void xattach_pipe (zmq::pipe_t *pipe_, bool subscribe_to_all_);
+    void xattach_pipe (zmq::pipe_t *pipe_,
+                       bool subscribe_to_all_,
+                       bool locally_initiated_);
     int xsend (zmq::msg_t *msg_);
     bool xhas_out ();
     int xrecv (zmq::msg_t *msg_);
     bool xhas_in ();
-    const blob_t &get_credential () const;
     void xread_activated (zmq::pipe_t *pipe_);
     void xwrite_activated (zmq::pipe_t *pipe_);
     void xhiccuped (pipe_t *pipe_);
@@ -66,6 +67,8 @@ class dish_t : public socket_base_t
     int xleave (const char *group_);
 
   private:
+    int xxrecv (zmq::msg_t *msg_);
+
     //  Send subscriptions to a pipe
     void send_subscriptions (pipe_t *pipe_);
 
@@ -84,11 +87,10 @@ class dish_t : public socket_base_t
     bool _has_message;
     msg_t _message;
 
-    dish_t (const dish_t &);
-    const dish_t &operator= (const dish_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (dish_t)
 };
 
-class dish_session_t : public session_base_t
+class dish_session_t ZMQ_FINAL : public session_base_t
 {
   public:
     dish_session_t (zmq::io_thread_t *io_thread_,
@@ -112,8 +114,7 @@ class dish_session_t : public session_base_t
 
     msg_t _group_msg;
 
-    dish_session_t (const dish_session_t &);
-    const dish_session_t &operator= (const dish_session_t &);
+    ZMQ_NON_COPYABLE_NOR_MOVABLE (dish_session_t)
 };
 }
 

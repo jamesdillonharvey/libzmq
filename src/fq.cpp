@@ -33,7 +33,7 @@
 #include "err.hpp"
 #include "msg.hpp"
 
-zmq::fq_t::fq_t () : _active (0), _last_in (NULL), _current (0), _more (false)
+zmq::fq_t::fq_t () : _active (0), _current (0), _more (false)
 {
 }
 
@@ -62,11 +62,6 @@ void zmq::fq_t::pipe_terminated (pipe_t *pipe_)
             _current = 0;
     }
     _pipes.erase (pipe_);
-
-    if (_last_in == pipe_) {
-        _saved_credential.set_deep_copy (_last_in->get_credential ());
-        _last_in = NULL;
-    }
 }
 
 void zmq::fq_t::activated (pipe_t *pipe_)
@@ -91,7 +86,7 @@ int zmq::fq_t::recvpipe (msg_t *msg_, pipe_t **pipe_)
     while (_active > 0) {
         //  Try to fetch new message. If we've already read part of the message
         //  subsequent part should be immediately available.
-        bool fetched = _pipes[_current]->read (msg_);
+        const bool fetched = _pipes[_current]->read (msg_);
 
         //  Note that when message is not fetched, current pipe is deactivated
         //  and replaced by another active pipe. Thus we don't have to increase
@@ -101,7 +96,6 @@ int zmq::fq_t::recvpipe (msg_t *msg_, pipe_t **pipe_)
                 *pipe_ = _pipes[_current];
             _more = (msg_->flags () & msg_t::more) != 0;
             if (!_more) {
-                _last_in = _pipes[_current];
                 _current = (_current + 1) % _active;
             }
             return 0;
@@ -148,9 +142,4 @@ bool zmq::fq_t::has_in ()
     }
 
     return false;
-}
-
-const zmq::blob_t &zmq::fq_t::get_credential () const
-{
-    return _last_in ? _last_in->get_credential () : _saved_credential;
 }

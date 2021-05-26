@@ -6,8 +6,25 @@
 #if defined ZMQ_HAVE_NORM
 
 #include "norm_engine.hpp"
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+#include "ip.hpp"
+#endif
+
 #include "session_base.hpp"
 #include "v2_protocol.hpp"
+
+
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+
+struct norm_wrapper_thread_args_t
+{
+    NormDescriptor norm_descriptor;
+    SOCKET wrapper_write_fd;
+    NormInstanceHandle norm_instance_handle;
+};
+
+DWORD WINAPI normWrapperThread (LPVOID lpParam);
+#endif
 
 zmq::norm_engine_t::norm_engine_t (io_thread_t *parent_,
                                    const options_t &options_) :
@@ -219,6 +236,18 @@ void zmq::norm_engine_t::shutdown ()
 void zmq::norm_engine_t::plug (io_thread_t *io_thread_,
                                session_base_t *session_)
 {
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+    norm_wrapper_thread_args_t *threadArgs = new norm_wrapper_thread_args_t;
+    int rc = make_fdpair (&wrapper_read_fd, &threadArgs->wrapper_write_fd);
+    threadArgs->norm_descriptor = NormGetDescriptor (norm_instance);
+    threadArgs->norm_instance_handle = norm_instance;
+    norm_descriptor_handle = add_fd (wrapper_read_fd);
+#else
+    fd_t normDescriptor = NormGetDescriptor (norm_instance);
+    norm_descriptor_handle = add_fd (normDescriptor);
+#endif
+    // Set POLLIN for notification of pending NormEvents
+    set_pollin (norm_descriptor_handle);
     // TBD - we may assign the NORM engine to an io_thread in the future???
     zmq_session = session_;
     if (is_sender)
@@ -226,20 +255,30 @@ void zmq::norm_engine_t::plug (io_thread_t *io_thread_,
     if (is_receiver)
         zmq_input_ready = true;
 
-    fd_t normDescriptor = NormGetDescriptor (norm_instance);
-    norm_descriptor_handle = add_fd (normDescriptor);
-    // Set POLLIN for notification of pending NormEvents
-    set_pollin (norm_descriptor_handle);
 
     if (is_sender)
         send_data ();
+
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+    wrapper_thread_handle = CreateThread (NULL, 0, normWrapperThread,
+                                          threadArgs, 0, &wrapper_thread_id);
+#endif
 
 } // end zmq::norm_engine_t::init()
 
 void zmq::norm_engine_t::unplug ()
 {
     rm_fd (norm_descriptor_handle);
-
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+    PostThreadMessage (wrapper_thread_id, WM_QUIT, (WPARAM) NULL,
+                       (LPARAM) NULL);
+    WaitForSingleObject (wrapper_thread_handle, INFINITE);
+    DWORD exitCode;
+    GetExitCodeThread (wrapper_thread_handle, &exitCode);
+    zmq_assert (exitCode != -1);
+    int rc = closesocket (wrapper_read_fd);
+    errno_assert (rc != -1);
+#endif
     zmq_session = NULL;
 } // end zmq::norm_engine_t::unplug()
 
@@ -329,11 +368,17 @@ void zmq::norm_engine_t::in_event ()
 {
     // This means a NormEvent is pending, so call NormGetNextEvent() and handle
     NormEvent event;
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+    int rc = recv (wrapper_read_fd, reinterpret_cast<char *> (&event),
+                   sizeof (event), 0);
+    errno_assert (rc == sizeof (event));
+#else
     if (!NormGetNextEvent (norm_instance, &event)) {
         // NORM has died before we unplugged?!
         zmq_assert (false);
         return;
     }
+#endif
 
     switch (event.type) {
         case NORM_TX_QUEUE_VACANCY:
@@ -382,7 +427,7 @@ void zmq::norm_engine_t::in_event ()
     }
 } // zmq::norm_engine_t::in_event()
 
-void zmq::norm_engine_t::restart_input ()
+bool zmq::norm_engine_t::restart_input ()
 {
     // TBD - should we check/assert that zmq_input_ready was false???
     zmq_input_ready = true;
@@ -390,6 +435,7 @@ void zmq::norm_engine_t::restart_input ()
     if (!msg_ready_list.IsEmpty ())
         recv_data (NORM_OBJECT_INVALID);
 
+    return true;
 } // end zmq::norm_engine_t::restart_input()
 
 void zmq::norm_engine_t::recv_data (NormObjectHandle object)
@@ -406,7 +452,8 @@ void zmq::norm_engine_t::recv_data (NormObjectHandle object)
         if (NULL == rxState) {
             // This is a new stream, so create rxState with zmq decoder, etc
             rxState = new (std::nothrow)
-              NormRxStreamState (object, options.maxmsgsize, options.zero_copy);
+              NormRxStreamState (object, options.maxmsgsize, options.zero_copy,
+                                 options.in_batch_size);
             errno_assert (rxState);
 
             if (!rxState->Init ()) {
@@ -547,10 +594,14 @@ void zmq::norm_engine_t::recv_data (NormObjectHandle object)
 } // end zmq::norm_engine_t::recv_data()
 
 zmq::norm_engine_t::NormRxStreamState::NormRxStreamState (
-  NormObjectHandle normStream, int64_t maxMsgSize, bool zeroCopy) :
+  NormObjectHandle normStream,
+  int64_t maxMsgSize,
+  bool zeroCopy,
+  int inBatchSize) :
     norm_stream (normStream),
     max_msg_size (maxMsgSize),
     zero_copy (zeroCopy),
+    in_batch_size (inBatchSize),
     in_sync (false),
     rx_ready (false),
     zmq_decoder (NULL),
@@ -582,7 +633,6 @@ bool zmq::norm_engine_t::NormRxStreamState::Init ()
     skip_norm_sync = false;
     if (NULL != zmq_decoder)
         delete zmq_decoder;
-    // Note "in_batch_size" comes from config.h
     zmq_decoder =
       new (std::nothrow) v2_decoder_t (in_batch_size, max_msg_size, zero_copy);
     alloc_assert (zmq_decoder);
@@ -708,9 +758,65 @@ zmq::norm_engine_t::NormRxStreamState::List::Iterator::GetNextItem ()
     return nextItem;
 } // end zmq::norm_engine_t::NormRxStreamState::List::Iterator::GetNextItem()
 
-const char *zmq::norm_engine_t::get_endpoint () const
+const zmq::endpoint_uri_pair_t &zmq::norm_engine_t::get_endpoint () const
 {
-    return "";
+    return _empty_endpoint;
 }
+
+
+#ifdef ZMQ_USE_NORM_SOCKET_WRAPPER
+#include <iostream>
+DWORD WINAPI normWrapperThread (LPVOID lpParam)
+{
+    norm_wrapper_thread_args_t *norm_wrapper_thread_args =
+      (norm_wrapper_thread_args_t *) lpParam;
+    NormEvent message;
+    DWORD waitRc;
+    DWORD exitCode = 0;
+    int rc;
+
+    for (;;) {
+        // wait for norm event or message
+        waitRc = MsgWaitForMultipleObjectsEx (
+          1, &norm_wrapper_thread_args->norm_descriptor, INFINITE,
+          QS_ALLPOSTMESSAGE, 0);
+
+        // Check if norm event
+        if (waitRc == WAIT_OBJECT_0) {
+            // Process norm event
+            if (!NormGetNextEvent (
+                  norm_wrapper_thread_args->norm_instance_handle, &message)) {
+                exitCode = -1;
+                break;
+            }
+            rc =
+              send (norm_wrapper_thread_args->wrapper_write_fd,
+                    reinterpret_cast<char *> (&message), sizeof (message), 0);
+            errno_assert (rc != -1);
+            // Check if message
+        } else if (waitRc == WAIT_OBJECT_0 + 1) {
+            // Exit if WM_QUIT is received otherwise do nothing
+            MSG message;
+            GetMessage (&message, 0, 0, 0);
+            if (message.message == WM_QUIT) {
+                break;
+            } else {
+                // do nothing
+            }
+            // Otherwise an error occurred
+        } else {
+            exitCode = -1;
+            break;
+        }
+    }
+    // Free resources
+    rc = closesocket (norm_wrapper_thread_args->wrapper_write_fd);
+    free (norm_wrapper_thread_args);
+    errno_assert (rc != -1);
+
+    return exitCode;
+}
+
+#endif
 
 #endif // ZMQ_HAVE_NORM
