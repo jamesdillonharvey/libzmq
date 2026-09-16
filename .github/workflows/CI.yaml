@@ -70,6 +70,15 @@ jobs:
             PACKAGES: cmake clang-format-18
             DO_CLANG_FORMAT_CHECK: 1
           - os: ubuntu-latest
+            BUILD_TYPE: cmake
+            DRAFT: enabled
+            PACKAGES: cmake
+            ZMTP_FALLBACK: disabled
+          - os: ubuntu-latest
+            BUILD_TYPE: default
+            DRAFT: enabled
+            ZMTP_FALLBACK: disabled
+          - os: ubuntu-latest
             BUILD_TYPE: default
             PACKAGES: libkrb5-dev libnorm-dev libpgm-dev libgnutls28-dev libsodium-dev libnss3-dev libbsd-dev
             CURVE: libsodium
@@ -144,6 +153,7 @@ jobs:
       FORCE_98: ${{ matrix.FORCE_98 }}
       CXX: ${{ matrix.CXX }}
       GSSAPI: ${{ matrix.GSSAPI }}
+      ZMTP_FALLBACK: ${{ matrix.ZMTP_FALLBACK }}
       PGM: ${{ matrix.PGM }}
       NORM: ${{ matrix.NORM }}
       TIPC: ${{ matrix.TIPC }}
