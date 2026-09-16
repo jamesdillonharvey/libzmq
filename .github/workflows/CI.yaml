@@ -71,12 +71,10 @@ jobs:
             DO_CLANG_FORMAT_CHECK: 1
           - os: ubuntu-latest
             BUILD_TYPE: cmake
-            DRAFT: enabled
             PACKAGES: cmake
             ZMTP_FALLBACK: disabled
           - os: ubuntu-latest
             BUILD_TYPE: default
-            DRAFT: enabled
             ZMTP_FALLBACK: disabled
           - os: ubuntu-latest
             BUILD_TYPE: default
